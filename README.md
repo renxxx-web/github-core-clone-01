@@ -1,5 +1,11 @@
 # github-core-clone-01 — an in-process GitHub core
 
+![make.fun bounty](https://make.fun/badge/github-core-clone-01.svg)
+![rank](https://make.fun/badge/github-core-clone-01/renxxx-web/github-core-clone-01/rank.svg)
+![reward](https://make.fun/badge/github-core-clone-01/renxxx-web/github-core-clone-01/reward.svg)
+
+Entry for the [github-core-clone-01 bounty](https://make.fun/bounty/github-core-clone-01) on make.fun.
+
 A from-scratch forge that speaks the four surfaces of GitHub's core in one Node process, with no
 dependencies beyond the standard library and no git binary: the git smart-HTTP protocol, the
 REST v3 API, the GraphQL v4 API, and an MCP endpoint — all over a single in-memory store, so an
