@@ -281,35 +281,58 @@ export function readPack(pack: Buffer, external?: ReadonlyMap<string, GitObject>
   }
 
   const resolved = new Map<string, GitObject>();
-  const resolveEntry = (entry: RawEntry, depth: number): GitObject => {
-    if (depth > 64) throw new Error('delta chain too deep');
-    if (entry.typeCode >= 1 && entry.typeCode <= 4) {
-      return { type: TYPE_BY_CODE[entry.typeCode], data: entry.data };
-    }
-    let base: GitObject | undefined;
-    if (entry.baseOffset !== undefined) {
-      const baseEntry = byOffset.get(entry.baseOffset);
-      if (baseEntry === undefined) throw new Error('ofs-delta base missing from pack');
-      base = resolveEntry(baseEntry, depth + 1);
-    } else if (entry.baseOid !== undefined) {
-      base = resolved.get(entry.baseOid) ?? external?.get(entry.baseOid);
-      if (base === undefined) {
-        // The base may sit later in the same pack.
-        const baseEntry = raw.find((candidate) => {
-          if (candidate.typeCode < 1 || candidate.typeCode > 4) return false;
-          return hashObject(TYPE_BY_CODE[candidate.typeCode], candidate.data) === entry.baseOid;
-        });
-        if (baseEntry !== undefined) base = resolveEntry(baseEntry, depth + 1);
+  // Resolution is memoised per raw entry: a popular base object is resolved (and hashed) once,
+  // however many deltas sit on it, and each entry's own object id is computed exactly once —
+  // the previous shape re-hashed every object at the end and re-walked bases per delta.
+  const memo = new Map<RawEntry, { object: GitObject; oid: string }>();
+  // Built lazily, only if a REF delta actually needs to find its base inside this pack: an
+  // oid -> entry index for the pack's plain entries, replacing a linear scan that re-hashed
+  // every candidate for every delta.
+  let plainByOid: Map<string, RawEntry> | null = null;
+  const findPlainByOid = (oid: string): RawEntry | undefined => {
+    if (plainByOid === null) {
+      plainByOid = new Map();
+      for (const candidate of raw) {
+        if (candidate.typeCode >= 1 && candidate.typeCode <= 4) {
+          plainByOid.set(hashObject(TYPE_BY_CODE[candidate.typeCode], candidate.data), candidate);
+        }
       }
-      if (base === undefined) throw new Error(`ref-delta base ${entry.baseOid} not found`);
     }
-    if (base === undefined) throw new Error('delta without a base');
-    return { type: base.type, data: applyDelta(base.data, entry.data) };
+    return plainByOid.get(oid);
+  };
+  const resolveEntry = (entry: RawEntry, depth: number): { object: GitObject; oid: string } => {
+    const hit = memo.get(entry);
+    if (hit !== undefined) return hit;
+    if (depth > 64) throw new Error('delta chain too deep');
+    let object: GitObject;
+    if (entry.typeCode >= 1 && entry.typeCode <= 4) {
+      object = { type: TYPE_BY_CODE[entry.typeCode], data: entry.data };
+    } else {
+      let base: GitObject | undefined;
+      if (entry.baseOffset !== undefined) {
+        const baseEntry = byOffset.get(entry.baseOffset);
+        if (baseEntry === undefined) throw new Error('ofs-delta base missing from pack');
+        base = resolveEntry(baseEntry, depth + 1).object;
+      } else if (entry.baseOid !== undefined) {
+        base = resolved.get(entry.baseOid) ?? external?.get(entry.baseOid);
+        if (base === undefined) {
+          // The base may sit later in the same pack.
+          const baseEntry = findPlainByOid(entry.baseOid);
+          if (baseEntry !== undefined) base = resolveEntry(baseEntry, depth + 1).object;
+        }
+        if (base === undefined) throw new Error(`ref-delta base ${entry.baseOid} not found`);
+      }
+      if (base === undefined) throw new Error('delta without a base');
+      object = { type: base.type, data: applyDelta(base.data, entry.data) };
+    }
+    const settled = { object, oid: hashObject(object.type, object.data) };
+    memo.set(entry, settled);
+    return settled;
   };
 
   for (const entry of raw) {
-    const object = resolveEntry(entry, 0);
-    resolved.set(hashObject(object.type, object.data), object);
+    const { object, oid } = resolveEntry(entry, 0);
+    resolved.set(oid, object);
   }
   return { objects: resolved, count };
 }
